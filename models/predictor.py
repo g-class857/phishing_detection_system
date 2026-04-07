@@ -9,39 +9,33 @@ import numpy as np
 import xgboost as xgb
 import joblib
 
+import re
+import urllib.parse 
+import difflib 
+
 import sys  
 import argparse  
 import requests
 
 try:
-	import shap
-	SHAP_AVAILABLE = True
+    import shap
+    SHAP_AVAILABLE = True
 except ImportError:
-	SHAP_AVAILABLE = False
+    SHAP_AVAILABLE = False
 
-# Ensure these .py files are in the same directory or Python path
-
-# ------------------------------------------------------------
-# 1. Project Paths (GLOBAL SCOPE)
-# ------------------------------------------------------------
-# This finds the 'phishing detection system' folder
+# --- Project Paths ---
 ROOT = Path(__file__).resolve().parent.parent 
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 MODEL_DIR = ROOT / "models"
 LOG_DIR = ROOT / "logs"
 
-# Ensure directories exist
 LOG_DIR.mkdir(exist_ok=True)
 
-# Define all file paths used by the Predictor
 MODEL_PATH = MODEL_DIR / "phishguard_xgb.json"
 SCHEMA_PATH = MODEL_DIR / "feature_schema.json"
-SCALER_PATH = MODEL_DIR / "manual_scaler.pkl"
-METADATA_PATH = MODEL_DIR / "model_metadata.json"
-SHAP_BACKGROUND_PATH = MODEL_DIR / "shap_background.npy"
 WAZUH_JSONL_PATH = LOG_DIR / "phishguard_predictions.jsonl"
-
+SHAP_BACKGROUND_PATH = MODEL_DIR / "shap_background.npy"
 
 try:
     from src.features.preprocess import production_preprocessing
@@ -51,55 +45,42 @@ try:
 except ImportError as e:
     print(f"CRITICAL: Missing custom module: {e}")
     sys.exit(1)
-# ------------------------------------------------------------
-# 2. Thresholds & Logging
-# ------------------------------------------------------------
+
 SAFE_THRESHOLD = 0.30
 PHISHING_THRESHOLD = 0.70
+TARGET_BRANDS = ["microsoft", "apple", "paypal", "amazon", "google", "netflix", "facebook"]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger("PhishGuard.Predictor")
 
+def transliterate_homoglyphs(text: str) -> str:
+    """Translates common visual tricks back to standard ASCII."""
+    cmap = {
+        'а': 'a', 'с': 'c', 'е': 'e', 'о': 'o', 'р': 'p', 'х': 'x', 'у': 'y', # Cyrillic
+        'і': 'i', 'ј': 'j', 'ѕ': 's', 'ԁ': 'd', 'ԛ': 'q', 'ԝ': 'w',
+        'α': 'a', 'ο': 'o', 'ν': 'v', 'ρ': 'p', 'τ': 't', 'μ': 'u',           # Greek
+        '0': 'o', '1': 'l', '3': 'e', '5': 's'                                # Numeric
+    }
+    # Handle the classic 'rn' masquerading as 'm'
+    text = text.replace('rn', 'm')
+    return ''.join(cmap.get(c, c) for c in text)
+    
 class PhishGuardPredictor:
-    def _load_feature_names(self) -> List[str]:
-        """
-        Loads the exact order of features the model was trained on.
-        This is critical for SHAP to display the correct labels.
-        """
-        if not SCHEMA_PATH.exists():
-            logger.error(f"Feature schema missing at {SCHEMA_PATH}")
-            # Fallback: if schema is missing, you might need to hardcode 
-            # or raise an error depending on how strict your pipeline is.
-            raise FileNotFoundError(f"Missing {SCHEMA_PATH}. SHAP cannot map features.")
-            
-        with open(SCHEMA_PATH, "r") as f:
-            schema = json.load(f)
-            
-        # We assume your JSON has a key called 'feature_order'
-        feature_names = schema.get("feature_order", [])
-        logger.info(f"Loaded {len(feature_names)} feature definitions from schema.")
-        return feature_names
-        
     def __init__(self, vt_api_key: Optional[str] = None):
         logger.info("Initializing PhishGuard Production Engine...")
-        
-        # 1. Load XGBoost Model (JSON format)
         self.model = xgb.Booster()
         self.model.load_model(str(MODEL_PATH))
-        
-        # 2. Load Feature Builder
         self.builder = FeatureBuilder()
-        
-        # 3. Load FastText (This loads the .bin file into RAM ONCE)
         self.ft_extractor = FastTextFeatureExtractor()
-        
-        # 4. Initialize VT Client
-        # If vt_api_key is passed here, it overrides whatever is inside vt_client.py
         self.vt_client = VT_Client(api_key=vt_api_key) 
-
-        # 5. Load SHAP
         self.feature_names = self._load_feature_names()
         self.explainer = self._init_shap()
+
+    def _load_feature_names(self) -> List[str]:
+        if not SCHEMA_PATH.exists():
+            raise FileNotFoundError(f"Missing {SCHEMA_PATH}. SHAP cannot map features.")
+        with open(SCHEMA_PATH, "r") as f:
+            return json.load(f).get("feature_order", [])
 
     def _init_shap(self):
         if SHAP_AVAILABLE and SHAP_BACKGROUND_PATH.exists():
@@ -107,119 +88,207 @@ class PhishGuardPredictor:
                 bg_data = np.load(SHAP_BACKGROUND_PATH)
                 return shap.TreeExplainer(self.model, data=bg_data)
             except Exception as e:
-                logger.error(f"Failed to load SHAP explainer: {e}")
+                logger.error(f"Failed to load SHAP: {e}")
         return None
-
-    def explain(self, vector: np.ndarray) -> List[Dict]:
-        if not self.explainer:
-            return []
         
+    def _evaluate_security_heuristics(self, processed_dict: Dict[str, Any]) -> List[Dict]:
+        alerts = []
+        TARGET_BRANDS = ["apple", "amazon", "paypal", "microsoft", "google"]
+        raw_text = processed_dict.get("raw_text", "")
+        
+        # --- 1. AGGRESSIVE DATA EXTRACTION ---
+        domains_to_check = set()
+        
+        # A. Extract Sender from Raw Text
+        sender_domain = ""
+        from_match = re.search(r'^From:\s*.*<(.+?)>', raw_text, re.M | re.I)
+        if from_match:
+            sender_domain = from_match.group(1).split('@')[-1].strip("<>\"' ").lower()
+            domains_to_check.add(sender_domain)
+
+        # B. Extract EVERY URL from Raw Text (handles hidden links and plain text)
+        all_urls = re.findall(r'https?://[^\s<>"\'()]+', raw_text, re.I)
+        for link in all_urls:
+            try:
+                netloc = urllib.parse.urlparse(link).netloc.lower().split(':')[0]
+                if netloc:
+                    domains_to_check.add(netloc)
+            except:
+                continue
+
+        # --- 2. DOMAIN ANALYSIS ---
+        for raw_domain in domains_to_check:
+            # Decode Punycode if present
+            try:
+                unicode_domain = raw_domain.encode('utf-8').decode('idna')
+            except:
+                unicode_domain = raw_domain
+            
+            domain_core = unicode_domain.split('.')[0].lower()
+            core_no_hyphens = domain_core.replace('-', '')
+            
+            # Translate homoglyphs to see what word they are trying to hide
+            normalized_core = transliterate_homoglyphs(core_no_hyphens)
+            has_tricks = (normalized_core != core_no_hyphens)
+
+            # Test against target brands
+            for brand in TARGET_BRANDS:
+                
+                # TEST A: Substring Impersonation (Catches "pay-pal-security")
+                # If 'paypal' is in 'paypalsecurity', but it isn't exactly 'paypal.com'
+                if brand in normalized_core and normalized_core != brand:
+                    alerts.append({
+                        "feature": f"Brand Impersonation ({brand})",
+                        "impact_score": 999.8,
+                        "actual_value": raw_domain,
+                        "direction": "increases_risk"
+                    })
+                    break # Prevent duplicate brand alerts
+                    
+                # TEST B: Exact Homoglyph Match (Catches "аррle")
+                # If translating tricks results in an exact brand match
+                if has_tricks and normalized_core == brand:
+                    alerts.append({
+                        "feature": f"Homoglyph Deception ({brand})",
+                        "impact_score": 999.7,
+                        "actual_value": unicode_domain,
+                        "direction": "increases_risk"
+                    })
+                    break
+
+                # TEST C: Standard Typosquatting (Catches "amzaon")
+                for part in domain_core.split('-'):
+                    norm_part = transliterate_homoglyphs(part)
+                    sim = difflib.SequenceMatcher(None, brand, norm_part).ratio()
+                    if 0.80 <= sim < 1.0: # Bumped to 0.80 to avoid short-word false positives
+                        alerts.append({
+                            "feature": f"Levenshtein: Brand Spoof ({brand})",
+                            "impact_score": 999.8,
+                            "actual_value": f"Matched '{part}' ({round(sim*100)}%)",
+                            "direction": "increases_risk"
+                        })
+                        break
+
+            # TEST D: IP Address Host (Catches "192.168.4.12")
+            if re.search(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', raw_domain):
+                alerts.append({
+                    "feature": "Critical: IP Address as Host",
+                    "impact_score": 999.9,
+                    "actual_value": raw_domain,
+                    "direction": "increases_risk"
+                })
+
+        # --- 3. SENDER SPOOFING (Return-Path Check) ---
+        rp_match = re.search(r'^Return-Path:\s*<(.+?)>', raw_text, re.M | re.I)
+        if rp_match and sender_domain:
+            rp_domain = rp_match.group(1).split('@')[-1].strip("<>\"' ").lower()
+            if rp_domain != sender_domain:
+                alerts.append({
+                    "feature": "Critical: Sender Spoofing",
+                    "impact_score": 999.6,
+                    "actual_value": f"From: {sender_domain} vs Return: {rp_domain}",
+                    "direction": "increases_risk"
+                })
+
+        return alerts
+    def explain(self, vector: np.ndarray, raw_dict: Dict[str, Any], decision: str) -> List[Dict]:
+        if not self.explainer: return []
         try:
             shap_values = self.explainer.shap_values(vector)
-            if isinstance(shap_values, list): 
-                shap_values = shap_values[0]
+            if isinstance(shap_values, list): shap_values = shap_values[0]
             
             contributions = []
-            # Flatten vector for iteration
-            flat_vector = vector.flatten() if hasattr(vector, "flatten") else vector[0]
-            
             for i, val in enumerate(shap_values[0]):
+                feature_name = self.feature_names[i]
+                if feature_name.startswith("emb_") or val == 0: continue
+                
                 contributions.append({
-                    "feature": self.feature_names[i] if i < len(self.feature_names) else f"Feature_{i}",
-                    "impact": round(float(val), 4),
-                    "value": float(flat_vector[i]),
+                    "feature": feature_name.replace("_", " ").title(),
+                    "impact_score": round(float(val), 4),
                     "direction": "increases_risk" if val > 0 else "decreases_risk"
                 })
-            
-            # Sort by absolute impact to find the top 5 reasons
-            return sorted(contributions, key=lambda x: abs(x["impact"]), reverse=True)[:5]
+            return contributions
         except Exception as e:
-            logger.error(f"SHAP explanation failed: {e}")
+            logger.error(f"SHAP failed: {e}")
             return []
 
     def predict(self, raw_email: str) -> Dict[str, Any]:
         start_ts = time.time()
         event_id = hashlib.sha256(raw_email.encode()).hexdigest()
-
+        
         try:
-            # 1. Preprocessing
             processed = production_preprocessing(raw_email)
             if not processed:
-                return {"event_id": event_id, "status": "rejected", "reason": "invalid_format"}
+                return {"event_id": event_id, "status": "rejected"}
 
-            # 2. FastText Embedding
+            # Inference
             clean_text = processed.get("clean_text", "")
-            # Update this line if your FastText extractor method has a different name
             embedding = self.ft_extractor.get_embedding(clean_text)
-
-            # 3. Build Final Vector 
             final_vector = self.builder.build_vector(embedding, processed)
-
-            # 4. XGBoost Inference
-            dmat = xgb.DMatrix(final_vector)
-            prob = float(self.model.predict(dmat)[0])
+            prob = float(self.model.predict(xgb.DMatrix(final_vector))[0])
             
-            # 5. Threshold Logic
-            if prob < SAFE_THRESHOLD:
-                decision = "safe"
-            elif prob < PHISHING_THRESHOLD:
-                decision = "suspicious"
-            else:
-                decision = "phishing"
+            # Thresholding
+            if prob < SAFE_THRESHOLD: decision = "safe"
+            elif prob < PHISHING_THRESHOLD: decision = "suspicious"
+            else: decision = "phishing"
 
-            # 6. Reputation (Enrichment via VT_Client)
-            reputation = self.vt_client.get_reputations(
-                urls=processed.get("urls", []),
-                domains=processed.get("domains", []),
-                ips=processed.get("ips", [])
-            )
+            # Expert Overrides + AI Reasons
+            ai_reasons = self.explain(final_vector, processed, decision)
+            heuristic_alerts = self._evaluate_security_heuristics(processed)
+            
+            # COMBINE AND SORT: This makes 999.x scores appear first
+            all_reasons = heuristic_alerts + ai_reasons
+            sorted_reasons = sorted(all_reasons, key=lambda x: abs(x["impact_score"]), reverse=True)
+            if heuristic_alerts:
+            	decision = "phishing"
+            	prob = 1
 
-            # 7. SHAP Explanation
-            reasons = self.explain(final_vector) if decision != "safe" else []
-
-            # 8. Construct Output
             result = {
                 "event_id": event_id,
-                "timestamp": time.time(),
                 "probability": round(prob, 4),
                 "decision": decision,
-                "reputation_report": reputation,
-                "top_reasons": reasons,
-                "metadata": {
-                    "runtime_sec": round(time.time() - start_ts, 3),
-                    "model_version": "1.0.0"
-                }
+                "top_reasons": sorted_reasons[:5], # The top 5 now includes overrides
+                "metadata": {"runtime_sec": round(time.time() - start_ts, 3)}
             }
 
-            # 9. Write to JSONL for Wazuh
-            with open(WAZUH_JSONL_PATH, "a", encoding="utf-8") as f:
+            with open(WAZUH_JSONL_PATH, "a") as f:
                 f.write(json.dumps(result) + "\n")
 
             return result
 
         except Exception as e:
-            logger.error(f"Prediction pipeline failed: {e}")
-            return {"event_id": event_id, "status": "error", "error_message": str(e)}
+            logger.error(f"Pipeline error: {e}")
+            return {"event_id": event_id, "status": "error", "message": str(e)}
+
 if __name__ == "__main__":
-    import sys
-    import argparse
-
-    parser = argparse.ArgumentParser(description="PhishGuard Predictor CLI")
-    parser.add_argument("--vt-key", help="Your VirusTotal API Key (Overrides default)")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--vt-key", help="VirusTotal API Key")
+    args, _ = parser.parse_known_args()
     
-    args, unknown = parser.parse_known_args()
-    print("\n \t You wanna bypass me, huh, really haha ha, let's see what u have: \n \n \t press ctrl+d when u finish")
-
-    # Read the raw email from stdin
-    raw_email_input = sys.stdin.read()
-
-    if not raw_email_input.strip():
-        print("Error: No email data provided in stdin.")
-        sys.exit(1)
-
-    # Pass the user-provided API key (if any) to the Predictor
+    # 1. Boot up the predictor ONCE (This takes 5 minutes)
+    print("\n\t [Booting up PhishGuard... Please wait]\n \n ")
     predictor = PhishGuardPredictor(vt_api_key=args.vt_key)
-    
-    output = predictor.predict(raw_email_input)
-    print(output)
-    print(json.dumps(output, indent=2, ensure_ascii=False))
+    print("\n\t [System Ready! Models loaded into RAM]")
+
+    # 2. Stay open and accept emails continuously
+    while True:
+        print("\n\t--- Enter Email Raw Text (Type 'exit' to quit) ---")
+        lines = []
+        while True:
+            try:
+                line = input()
+                if line.strip() == "exit":
+                    sys.exit(0)
+                    
+                lines.append(line)
+            except EOFError:
+                break # Catches Ctrl+D
+                
+        raw_input = "\n".join(lines)
+        if not raw_input.strip(): 
+            continue
+
+        # This will now take < 1 second!
+        output = predictor.predict(raw_input)
+        print("\n \t--- RESULTS ---")
+        print(json.dumps(output, indent=2, ensure_ascii=False))
