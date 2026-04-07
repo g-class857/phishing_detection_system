@@ -436,12 +436,14 @@ def main():
 # =============================
 # PRODUCTION REAL-TIME FUNCTION
 # =============================
+from bs4 import BeautifulSoup
+import email
+
 def production_preprocessing(raw_email: str) -> Optional[Dict]:
     """
-    Takes raw email string → returns processed feature dict (same format as training)
-    Used in predictor.py for real-time inference.
+    Takes raw email string → returns processed feature dict.
+    Patched to retain raw metadata for Expert Overrides.
     """
-
     try:
         msg = email.message_from_string(raw_email)
     except Exception:
@@ -453,6 +455,9 @@ def production_preprocessing(raw_email: str) -> Optional[Dict]:
     body_parts = []
     html_present = 0
     attachments = []
+    
+    # NEW: Create a dedicated list to catch hidden HTML URLs
+    extracted_html_urls = []
 
     for part in msg.walk():
         try:
@@ -473,9 +478,13 @@ def production_preprocessing(raw_email: str) -> Optional[Dict]:
 
             elif ctype == "text/html":
                 html_present = 1
-                body_parts.append(
-                    BeautifulSoup(decoded, "html.parser").get_text(" ", strip=False)
-                )
+                soup = BeautifulSoup(decoded, "html.parser")
+                
+                # BUG 1 FIX: Extract href links before stripping HTML
+                for a_tag in soup.find_all('a', href=True):
+                    extracted_html_urls.append(a_tag['href'])
+                
+                body_parts.append(soup.get_text(" ", strip=False))
 
             if part.get_filename():
                 attachments.append(part.get_filename())
@@ -484,7 +493,12 @@ def production_preprocessing(raw_email: str) -> Optional[Dict]:
             continue
 
     body = normalize(" ".join(body_parts))
-    urls = safe_find_urls(body)
+    
+    # Combine plain text URLs with the hidden HTML URLs
+    urls = safe_find_urls(body) + extracted_html_urls
+    
+    # Remove duplicates just in case
+    urls = list(set(urls))
 
     header_fields = {
         "from_header": normalize(msg.get("From", "")),
@@ -500,17 +514,23 @@ def production_preprocessing(raw_email: str) -> Optional[Dict]:
     headers_text = "\n".join(f"{k}: {v}" for k, v in msg.items())
     auth_info = parse_auth_from_headers(headers_text)
 
-    
     features = build_features(
         subject, body, sender, urls,
         html_present, attachments,
-        label=-1,# because this is inference
+        label=-1,
         auth_info=auth_info,
         header_fields=header_fields
     )
 
-    return features
-    
+    # BUG 2 FIX: Force the raw metadata into the dictionary 
+    # so predictor.py can use them for security heuristics
+    if features is not None:
+        features["urls"] = urls
+        features["from_header"] = header_fields["from_header"]
+        features["return_path"] = header_fields["return_path"]
+        features["raw_text"] = raw_email # Useful if you need to regex the raw headers later
+
+    return features    
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "prod":
         raw_email = sys.stdin.read()
