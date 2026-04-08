@@ -5,7 +5,7 @@ import numpy as np
 from gensim.models.fasttext import load_facebook_vectors
 from tqdm import tqdm
 from pathlib import Path 
-
+ 
 # Default Config
 ROOT = Path(__file__).resolve().parent.parent.parent
 FEATURES_PATH = "phishguard_features.csv"
