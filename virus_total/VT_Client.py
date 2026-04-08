@@ -105,7 +105,7 @@ class VT_Client:
 # Example Usage Scenarios
 # ==========================================
 if __name__ == "__main__":
-    API_KEY = "6eb1277ac814620da44a53cc049d2bfe7a4239c6ea6c1c5d74e86707d20baa54"
+    API_KEY = "PUT YOUR API HERE"
     client = VT_Client(api_key=API_KEY, delay_seconds=0) # Set to 0 just for fast local testing
     
     print("Processing VT Client... ")
