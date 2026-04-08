@@ -22,3 +22,4 @@ pip install -r requireements.txt
 ## Usage 
 python predictor.py --vt-key YOUR_VIRUSTOTAL_API_KEY
 
+Enter the raw email and press enter then CTRL+D
