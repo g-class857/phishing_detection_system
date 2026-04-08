@@ -16,6 +16,7 @@ Designed for transparency and enterprise integration, PhishGuard utilizes SHAP (
 ## Creat and activate virtual environment
 python3 -m venv venv
 source venv/bin/activate  # On Windows use: .\venv\Scripts\activate
+
 pip install -r requireements.txt 
 
 ## Usage 
