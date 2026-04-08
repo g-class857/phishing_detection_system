@@ -198,7 +198,7 @@ class FeatureBuilder:
         returns the finalized 1D Numpy array for XGBoost.
         """
         if len(embedding_vector) != self.embedding_dim:
-            raise ValueError(f"Embedding dimension mismatch. Expected {self.embedding_dim}, got {len(embedding_vector)}")
+            raise ValueError(f"Embedding dimension mismatch. Expected {self.embedding_dim}, got {len(embedding_vector)}") 
 
         # Compute mismatch dynamically
         sender = manual_dict.get("from_header", manual_dict.get("sender", ""))
