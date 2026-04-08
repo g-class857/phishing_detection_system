@@ -240,17 +240,69 @@ class PhishGuardPredictor:
             all_reasons = heuristic_alerts + ai_reasons
             sorted_reasons = sorted(all_reasons, key=lambda x: abs(x["impact_score"]), reverse=True)
             if heuristic_alerts:
-            	decision = "phishing"
-            	prob = 1
+                decision = "phishing"
+                prob = 1
 
+            # --- VIRUS TOTAL INTEGRATION ---
+            vt_results = {}
+            # Only run if an API key was actually provided at startup
+            if self.vt_client.headers.get("x-apikey"): 
+                raw_text = processed.get("raw_text", raw_email)
+                
+                # 1. Extract Artifacts
+                vt_urls = list(set(re.findall(r'https?://[^\s<>"\'()]+', raw_text, re.I)))
+                vt_domains = set()
+                vt_ips = set()
+                
+                # Extract Sender Domain
+                from_match = re.search(r'^From:\s*.*<(.+?)>', raw_text, re.M | re.I)
+                if from_match:
+                    sender_dom = from_match.group(1).split('@')[-1].strip("<>\"' ").lower()
+                    vt_domains.add(sender_dom)
+                    
+                # Extract Domains and IPs from URLs
+                for link in vt_urls:
+                    try:
+                        netloc = urllib.parse.urlparse(link).netloc.lower().split(':')[0]
+                        if netloc:
+                            # Check if netloc is an IP address
+                            if re.search(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', netloc):
+                                vt_ips.add(netloc)
+                            else:
+                                vt_domains.add(netloc)
+                    except:
+                        continue
+                
+                # 2. Fetch Reputations (multithreading)
+                from concurrent.futures import ThreadPoolExecutor
+                if any([vt_urls, vt_domains, vt_ips]):
+                    with ThreadPoolExecutor(max_workers=5) as executor:
+                    	#Create a list of tasks
+        		future_urls = executor.submit(self.vt_client.get_reputations, urls=vt_urls)
+        		future_doms = executor.submit(self.vt_client.get_reputations, domains=list(vt_domains))
+        		future_ips = executor.submit(self.vt_client.get_reputations, ips=list(vt_ips))
+        
+        		# Merge the results as they finish
+        		vt_results.update(future_urls.result())
+        		vt_results.update(future_doms.result())
+        		vt_results.update(future_ips.result())
+                    
+
+            # --- BUILD FINAL RESULT ---
             result = {
                 "event_id": event_id,
                 "probability": round(prob, 4),
                 "decision": decision,
-                "top_reasons": sorted_reasons[:5], # The top 5 now includes overrides
-                "metadata": {"runtime_sec": round(time.time() - start_ts, 3)}
+                "top_reasons": sorted_reasons[:5],
             }
+            
+            # Conditionally add reputation results ONLY if they exist
+            if vt_results:
+                result["reputation_results"] = vt_results
+                
+            result["metadata"] = {"runtime_sec": round(time.time() - start_ts, 3)}
 
+            # Save to Wazuh JSONL
             with open(WAZUH_JSONL_PATH, "a") as f:
                 f.write(json.dumps(result) + "\n")
 
