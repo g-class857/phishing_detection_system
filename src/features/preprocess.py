@@ -527,7 +527,7 @@ def production_preprocessing(raw_email: str) -> Optional[Dict]:
     if features is not None:
         features["urls"] = urls
         features["from_header"] = header_fields["from_header"]
-        features["return_path"] = header_fields["return_path"]
+        features["return_path"] = header_fields["return_path"] 
         features["raw_text"] = raw_email # Useful if you need to regex the raw headers later
 
     return features    
