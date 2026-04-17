@@ -10,16 +10,16 @@ import xgboost as xgb
 import joblib
 
 import re
-import urllib.parse 
-import difflib 
+import urllib.parse # Parse URLs to extract netloc (domain or IP).
+import difflib # Sequence matching for typosquatting detection (Levenshtein‑like similarity).
 
 import sys  
 import argparse  
 import requests
 
 try:
-    import shap
-    SHAP_AVAILABLE = True
+    import shap # tries to import SHAP library for model explanations. 
+    SHAP_AVAILABLE = True # imported inside try to avoid crash if missing
 except ImportError:
     SHAP_AVAILABLE = False
 
@@ -38,7 +38,7 @@ WAZUH_JSONL_PATH = LOG_DIR / "phishguard_predictions.jsonl"
 SHAP_BACKGROUND_PATH = MODEL_DIR / "shap_background.npy"
 
 try:
-    from src.features.preprocess import production_preprocessing
+    from src.features.preprocess import production_preprocessing 
     from src.features.fasttext_features import FastTextFeatureExtractor
     from src.features.feature_concat import FeatureBuilder
     from virus_total.VT_Client import VT_Client
@@ -49,12 +49,12 @@ except ImportError as e:
 SAFE_THRESHOLD = 0.30
 PHISHING_THRESHOLD = 0.70
 TARGET_BRANDS = ["microsoft", "apple", "paypal", "amazon", "google", "netflix", "facebook"]
-
+# list of well-known brands for impersonation detection
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger("PhishGuard.Predictor")
 
 def transliterate_homoglyphs(text: str) -> str:
-    """Translates common visual tricks back to standard ASCII."""
+    """Translates common visual tricks back to standard ASCII. Used to detect deceptive domain names."""
     cmap = {
         'а': 'a', 'с': 'c', 'е': 'e', 'о': 'o', 'р': 'p', 'х': 'x', 'у': 'y', # Cyrillic
         'і': 'i', 'ј': 'j', 'ѕ': 's', 'ԁ': 'd', 'ԛ': 'q', 'ԝ': 'w',
@@ -68,31 +68,32 @@ def transliterate_homoglyphs(text: str) -> str:
 class PhishGuardPredictor:
     def __init__(self, vt_api_key: Optional[str] = None):
         logger.info("Initializing PhishGuard Production Engine...")
-        self.model = xgb.Booster()
+        self.model = xgb.Booster() # creat object and load pre-trained model
         self.model.load_model(str(MODEL_PATH))
         self.builder = FeatureBuilder()
         self.ft_extractor = FastTextFeatureExtractor()
         self.vt_client = VT_Client(api_key=vt_api_key) 
-        self.feature_names = self._load_feature_names()
-        self.explainer = self._init_shap()
+        self.feature_names = self._load_feature_names() # loads the ordered list of feature names (for SHAP explanations).
+        self.explainer = self._init_shap() # initialize shap tree explainer
 
     def _load_feature_names(self) -> List[str]:
         if not SCHEMA_PATH.exists():
             raise FileNotFoundError(f"Missing {SCHEMA_PATH}. SHAP cannot map features.")
-        with open(SCHEMA_PATH, "r") as f:
+        with open(SCHEMA_PATH, "r") as f: # read schema and get features order
             return json.load(f).get("feature_order", [])
 
     def _init_shap(self):
         if SHAP_AVAILABLE and SHAP_BACKGROUND_PATH.exists():
             try:
-                bg_data = np.load(SHAP_BACKGROUND_PATH)
-                return shap.TreeExplainer(self.model, data=bg_data)
+                bg_data = np.load(SHAP_BACKGROUND_PATH) # load background data (random subset of training features) 
+                return shap.TreeExplainer(self.model, data=bg_data) # creat tree explainer for xgb
             except Exception as e:
                 logger.error(f"Failed to load SHAP: {e}")
         return None
         
     def _evaluate_security_heuristics(self, processed_dict: Dict[str, Any]) -> List[Dict]:
-        alerts = []
+        """his method implements expert rules to detect obvious phishing indicators, independent of the ML model."""
+        alerts = [] 
         TARGET_BRANDS = ["apple", "amazon", "paypal", "microsoft", "google"]
         raw_text = processed_dict.get("raw_text", "")
         
@@ -110,9 +111,9 @@ class PhishGuardPredictor:
         all_urls = re.findall(r'https?://[^\s<>"\'()]+', raw_text, re.I)
         for link in all_urls:
             try:
-                netloc = urllib.parse.urlparse(link).netloc.lower().split(':')[0]
+                netloc = urllib.parse.urlparse(link).netloc.lower().split(':')[0] # exteracts domain or IP using urlparse
                 if netloc:
-                    domains_to_check.add(netloc)
+                    domains_to_check.add(netloc) 
             except:
                 continue
 
@@ -122,11 +123,11 @@ class PhishGuardPredictor:
             try:
                 unicode_domain = raw_domain.encode('utf-8').decode('idna')
             except:
-                unicode_domain = raw_domain
+                unicode_domain = raw_domain # convert punycode to unicode for proper matching
             
             domain_core = unicode_domain.split('.')[0].lower()
             core_no_hyphens = domain_core.replace('-', '')
-            
+            # Takes the first part of the domain (before the first dot).Removes hyphens.Applies homoglyph transliteration.Checks if any visual tricks were detected.
             # Translate homoglyphs to see what word they are trying to hide
             normalized_core = transliterate_homoglyphs(core_no_hyphens)
             has_tricks = (normalized_core != core_no_hyphens)
@@ -157,6 +158,9 @@ class PhishGuardPredictor:
                     break
 
                 # TEST C: Standard Typosquatting (Catches "amzaon")
+                """ Splits domain by hyphens, checks each part against brand.
+                    Uses difflib.SequenceMatcher to compute similarity ratio (0.0–1.0).
+                    If similarity ≥80% but not identical (e.g., amzaon vs amazon), raise alert."""
                 for part in domain_core.split('-'):
                     norm_part = transliterate_homoglyphs(part)
                     sim = difflib.SequenceMatcher(None, brand, norm_part).ratio()
@@ -176,7 +180,7 @@ class PhishGuardPredictor:
                     "impact_score": 999.9,
                     "actual_value": raw_domain,
                     "direction": "increases_risk"
-                })
+                }) # legitimate services use hostnames
 
         # --- 3. SENDER SPOOFING (Return-Path Check) ---
         rp_match = re.search(r'^Return-Path:\s*<(.+?)>', raw_text, re.M | re.I)
@@ -194,18 +198,18 @@ class PhishGuardPredictor:
     def explain(self, vector: np.ndarray, raw_dict: Dict[str, Any], decision: str) -> List[Dict]:
         if not self.explainer: return []
         try:
-            shap_values = self.explainer.shap_values(vector)
-            if isinstance(shap_values, list): shap_values = shap_values[0]
+            shap_values = self.explainer.shap_values(vector) # Computes SHAP values for the given feature vector (2D array with one row).
+            if isinstance(shap_values, list): shap_values = shap_values[0] # If output is a list (multi‑output), takes the first element.
             
             contributions = []
             for i, val in enumerate(shap_values[0]):
                 feature_name = self.feature_names[i]
-                if feature_name.startswith("emb_") or val == 0: continue
+                if feature_name.startswith("emb_") or val == 0: continue # skip, not human-readable, or 0 impact
                 
                 contributions.append({
-                    "feature": feature_name.replace("_", " ").title(),
+                    "feature": feature_name.replace("_", " ").title(), # use feature name
                     "impact_score": round(float(val), 4),
-                    "direction": "increases_risk" if val > 0 else "decreases_risk"
+                    "direction": "increases_risk" if val > 0 else "decreases_risk" # assign direction based on shap values
                 })
             return contributions
         except Exception as e:
@@ -233,6 +237,8 @@ class PhishGuardPredictor:
             else: decision = "phishing"
 
             # Expert Overrides + AI Reasons
+            # Generates SHAP explanations (AI reasons) and heuristic alerts.
+            # Combines and sorts by absolute impact score (highest first).
             ai_reasons = self.explain(final_vector, processed, decision)
             heuristic_alerts = self._evaluate_security_heuristics(processed)
             
@@ -242,7 +248,7 @@ class PhishGuardPredictor:
             if heuristic_alerts:
                 decision = "phishing"
                 prob = 1
-
+            # Override: If any heuristic alert is triggered, force decision to "phishing" and set probability to 1.0 (maximum confidence).
             # --- VIRUS TOTAL INTEGRATION ---
             vt_results = {}
             # Only run if an API key was actually provided at startup
