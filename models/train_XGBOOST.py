@@ -12,20 +12,20 @@ Production-grade training pipeline with:
 • SHAP background sampling
 """
 
-import json
-import time
+import json # saves model metadata
+import time 
 import multiprocessing as mp
-from pathlib import Path
+from pathlib import Path # object oriented path handling 
 
-import numpy as np
-import xgboost as xgb
-import optuna
-from optuna.pruners import MedianPruner
-from sklearn.metrics import average_precision_score
-import joblib
-import gc
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import precision_recall_curve
+import numpy as np # array operations
+import xgboost as xgb # XGBOOST algo lib for training and cross validation
+import optuna # hyperparameter opeimisation framework 
+from optuna.pruners import MedianPruner # prunes unpromising trials early
+from sklearn.metrics import average_precision_score # calculate precision score after training
+import joblib # saves scikit-learn wrapper model 
+import gc  # garbage collector to free memory after each trial
+from sklearn.model_selection import train_test_split # split data to train/test
+from sklearn.metrics import precision_recall_curve # compute optimal threshold from precision-recall curve
 # ==========================================================
 # Paths
 # ==========================================================
@@ -35,9 +35,9 @@ DATA_PATH = ROOT / "data/processed/embed_output/xgboost_features.npz"
 MODEL_DIR = ROOT / "models"
 MODEL_DIR.mkdir(exist_ok=True)
 
-MODEL_PATH = MODEL_DIR / "phishguard_xgb.json"
-METADATA_PATH = MODEL_DIR / "model_metadata.json"
-SHAP_BACKGROUND_PATH = MODEL_DIR / "shap_background.npy"
+MODEL_PATH = MODEL_DIR / "phishguard_xgb.json" # native model 
+METADATA_PATH = MODEL_DIR / "model_metadata.json" # training metadata
+SHAP_BACKGROUND_PATH = MODEL_DIR / "shap_background.npy" # background sample for SHAP explanations 
 
 
 # ==========================================================
