@@ -146,6 +146,18 @@ def clean_for_embeddings(text: str) -> str:
     return text if text else "<EMPTY>"
 
 def shannon_entropy(s: str) -> float:
+    """
+    Body Entropy (Shannon Entropy)
+   - Concept: A statistical measure of randomness or unpredictability in the 
+     character distribution of a sequence.
+   - ML Application (Phishing): 
+     * Low (~0.0-3.5): Highly repetitive, restricted character sets.
+     * Normal (~3.5-5.0): Natural human language (predictable letter frequency).
+     * High (~5.0-8.0+): Completely random gibberish, Base64 strings, or 
+       obfuscated URLs. A sudden spike in entropy is a strong feature for 
+       detecting malicious evasion techniques.
+    body entropy simply is a "weirdness meter" or a "randomness score" for the letters in an email.
+    """
     # count character frequencies, Computes information entropy of a string: high entropy → random‑looking (could indicate obfuscation).
     if not s: return 0.0
     counts = Counter(s)
