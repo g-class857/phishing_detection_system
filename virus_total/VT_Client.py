@@ -1,6 +1,6 @@
 import time
-import base64
-import requests
+import base64 # encode URLs to b64 since its required by VT
+import requests # perform http requests to VT API 
 from typing import List, Dict, Union, Optional
 
 class VT_Client:
@@ -13,12 +13,12 @@ class VT_Client:
 
     def __init__(self, api_key: str, delay_seconds: int = 15):
         self.headers = {"x-apikey": api_key}
-        self.delay = delay_seconds
+        self.delay = delay_seconds # 15 seconds delay as the policy of free API 
 
     def _encode_url_for_vt(self, url: str) -> str:
         """VirusTotal v3 requires URLs to be base64 url-safe encoded without '=' padding."""
         return base64.urlsafe_b64encode(url.encode()).decode().strip("=")
-
+# convert string to bytes -> B64 encode -> decode bytes to string -> remove padding "="
     def _get_reputation(self, endpoint: str, identifier: str) -> Union[int, str]:
         """
         Hits the VT API and safely extracts the raw 'reputation' integer.
@@ -33,14 +33,14 @@ class VT_Client:
                 if response.status_code == 200:
                     data = response.json()
                     return data.get("data", {}).get("attributes", {}).get("reputation", 0)
-                
+                # extract the native reputation score. .get() with defaults to avoid keyError if any level is missing
                 elif response.status_code == 429:
                     print(f"[-] Rate limit hit. Sleeping for {self.delay} seconds...")
                     time.sleep(self.delay)
                     continue
                 
                 elif response.status_code == 404:
-                    return "Not Found"
+                    return "Not Found. Check another intelligence resource"
                     
                 elif response.status_code in [401, 403]:
                     return "Auth/Permission Error"
@@ -77,7 +77,7 @@ class VT_Client:
                 if url:  # Protects against empty strings like [""]
                     vt_id = self._encode_url_for_vt(url)
                     rep = self._get_reputation("urls", vt_id)
-                    results[url] = rep
+                    results[url] = rep # use the original url as key
                     print(f"{url} : {rep}")
                     time.sleep(self.delay)
 
@@ -112,7 +112,7 @@ if __name__ == "__main__":
     client.get_reputations(
         urls=[""], 
         domains=[], 
-        ips=["8.8.8.8", "1.1.1.1"]
+        ips=[]
     )
  
 
