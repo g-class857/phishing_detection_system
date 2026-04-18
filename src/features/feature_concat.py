@@ -133,10 +133,10 @@ def train_pipeline():
     y = y[:min_len]
     
     logger.info("Removing unlabeled rows (-1)...")
-    mask = y != -1
+    mask = y != -1 # check every single value in y array not equal to -1. return new array of true and false values
     df = df.loc[mask].reset_index(drop=True) # renumbers rows consecutively
     embeddings = embeddings[mask]
-    y = y[mask] 
+    y = y[mask] # just keep the True values of mask which their label not -1 and drop other rows
 
     logger.info(f"Remaining labeled samples: {len(y)}")
     if len(y) == 0:
@@ -160,7 +160,7 @@ def train_pipeline():
     X = np.hstack([X_emb, X_manual]).astype(np.float32)
     # horizontally stacks embeddings and manual features side by side 
     logger.info("Saving training features...")
-    np.savez_compressed(OUTPUT_PATH, X=X, y=y)
+    np.savez_compressed(OUTPUT_PATH, =, y=y)
     # saves combined features and labels in compressed .npz
     schema = {
         "embedding_dim": X_emb.shape[1],
