@@ -76,7 +76,7 @@ class PhishGuardPredictor:
         self.feature_names = self._load_feature_names() # loads the ordered list of feature names (for SHAP explanations).
         self.explainer = self._init_shap() # initialize shap tree explainer
 
-    def _load_feature_names(self) -> List[str]:
+    def _load_feature_names(self) -> List[str]:# private helper function for this class
         if not SCHEMA_PATH.exists():
             raise FileNotFoundError(f"Missing {SCHEMA_PATH}. SHAP cannot map features.")
         with open(SCHEMA_PATH, "r") as f: # read schema and get features order
@@ -202,8 +202,8 @@ class PhishGuardPredictor:
             if isinstance(shap_values, list): shap_values = shap_values[0] # If output is a list (multi‑output), takes the first element.
             
             contributions = []
-            for i, val in enumerate(shap_values[0]):
-                feature_name = self.feature_names[i]
+            for i, val in enumerate(shap_values[0]): # shap results stored in list, index 0 target the email we're explaining. enumerate(index (i), value(val))
+                feature_name = self.feature_names[i] # use i as index to get the human feature name 
                 if feature_name.startswith("emb_") or val == 0: continue # skip, not human-readable, or 0 impact
                 
                 contributions.append({
@@ -218,7 +218,7 @@ class PhishGuardPredictor:
 
     def predict(self, raw_email: str) -> Dict[str, Any]:
         start_ts = time.time()
-        event_id = hashlib.sha256(raw_email.encode()).hexdigest()
+        event_id = hashlib.sha256(raw_email.encode()).hexdigest() # encode is required to convert str to bytes, hexdigest to convert the resulted binary to hex
         
         try:
             processed = production_preprocessing(raw_email)
