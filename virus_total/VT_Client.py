@@ -19,6 +19,7 @@ class VT_Client:
         """VirusTotal v3 requires URLs to be base64 url-safe encoded without '=' padding."""
         return base64.urlsafe_b64encode(url.encode()).decode().strip("=")
 # convert string to bytes -> B64 encode -> decode bytes to string -> remove padding "="
+# encode works only with bytes, urlsafe_b64encode() replace +,/ with -,_ to avoid confusion, .decode() convert bytes to str, remove = to avoid causing API call issues.
     def _get_reputation(self, endpoint: str, identifier: str) -> Union[int, str]:
         """
         Hits the VT API and safely extracts the raw 'reputation' integer.
@@ -31,7 +32,7 @@ class VT_Client:
                 response = requests.get(api_url, headers=self.headers)
                 
                 if response.status_code == 200:
-                    data = response.json()
+                    data = response.json() # convert str to python dict to use key:value
                     return data.get("data", {}).get("attributes", {}).get("reputation", 0)
                 # extract the native reputation score. .get() with defaults to avoid keyError if any level is missing
                 elif response.status_code == 429:
