@@ -61,7 +61,7 @@ class FastTextFeatureExtractor:
         print(f"Loaded {len(texts)} samples.")
 
         print("Generating embeddings for entire dataset...")
-        embedds = np.zeros((len(texts), self.embed_dim), dtype=np.float32) # pre‑allocates a 2D array of zeros to hold all embeddings. This is faster than appending.
+        embedds = np.zeros((len(texts), self.embed_dim), dtype=np.float32) # for optimization: pre‑allocates a 2D array of zeros in memory to hold all embeddings. This is faster than appending.
 
         for i in tqdm(range(len(texts))): # show the progress bar while iterating over the text
             embedds[i] = self.get_embedding(texts[i])
