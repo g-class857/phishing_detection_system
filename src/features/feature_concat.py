@@ -97,17 +97,17 @@ def extract_manual_features(df: pd.DataFrame) -> np.ndarray:
 
     df[NUMERIC_BASE + COUNT_FEATURES] = df[NUMERIC_BASE + COUNT_FEATURES].apply(
         pd.to_numeric, errors="coerce"
-    ).fillna(0) # Converts them to numeric (coerce errors to NaN) then fill NaN with 0.
-
+    ).fillna(0) # Converts them to numeric (coerce errors to NaN) then fill NaN with 0.replace not number values with NaN then convert NaN -> O 
+# instead of replacing with zero let the model to handle it 
     # Vectorized return_path mismatch
     # Checking both 'from_header' and 'sender' to ensure robustness
     sender_col = df["from_header"] if "from_header" in df.columns else df.get("sender", pd.Series([""]*len(df)))
     sender_domains = sender_col.apply(extract_domain)
     return_domains = df.get("return_path", pd.Series([""]*len(df))).apply(extract_domain)
-
+# safety net to prevent code from crash, handle by assigning missing values instead of crashing the code. 
     df["return_path_mismatch"] = (
         (sender_domains != "") &
-        (return_domains != "") &
+        (return_domains != "") & # change it to use apply() 
         (sender_domains != return_domains)
     ).astype(int) # creates boolean mask where both domains are non‑empty and different, then casts to int.
     return df[MANUAL_FEATURES].values.astype(np.float32)
@@ -150,7 +150,7 @@ def train_pipeline():
     
     logger.info("Scaling manual features...")
     scaler = StandardScaler() # standerises manual features 
-    X_manual = scaler.fit_transform(X_manual)
+    X_manual = scaler.fit_transform(X_manual) # standarise the large values to smaller ones so that the model don't lose calculations
     joblib.dump(scaler, SCALER_PATH)
 
     logger.info("Stacking embeddings...")
@@ -215,7 +215,7 @@ class FeatureBuilder:
             manual_values.append(val)
 
         # Reshape for scaler (1 sample, n features)
-        manual_array = np.array(manual_values).reshape(1, -1)
+        manual_array = np.array(manual_values).reshape(1, -1) # convert the python list from 1D array to 2D array based on the features numbers that (-1) would find out the exact number of features in this case it will result in (1,14)
         scaled_manual = self.scaler.transform(manual_array) # apply the same scaling
 
         # Concatenate: [Embeddings, Scaled Manual Features]
