@@ -1,27 +1,21 @@
 #!/usr/bin/env python3
 """
-PhishGuard – English-Only Email Preprocessing Engine
-Changes:
-- Added `is_english_quality_check` to filter out non-English text.
-- Modified pipeline to DROP rows that fail English detection.
-- Fixed clean_for_embeddings to never return empty strings (prevents CSV misalignment).
+English-Only Email Preprocessing Engine
 """
-import os # file system operations
-import re # regex 
-import time # measures time
-import math # logarithm for shannon entropy
-import hashlib # creat hash for deduplicate
-import logging # informative output
-import email # parse email from .eml files 
-from multiprocessing import Pool, cpu_count # parallel processing
-from collections import Counter # count character frequencies for entropy calculation
-from typing import Dict, List, Optional, Iterable # type hints for function signatures ( readability ) 
-import sys # access system specific parameters
-import csv # work with csv files
+import os 
+import re 
+import time 
+import math 
+import hashlib 
+import logging 
+import email  
+from multiprocessing import Pool, cpu_count 
+from collections import Counter 
+from typing import Dict, List, Optional, Iterable 
+import sys 
+import csv 
 
-# Increase CSV field limit
 _max_int = sys.maxsize
-# maximum integer on the platform. If setting it directly causes OverflowError (e.g., on 32‑bit systems), the limit is halved repeatedly until it works.
 while True:
     try:
         csv.field_size_limit(_max_int)
@@ -29,32 +23,28 @@ while True:
     except OverflowError:
         _max_int = int(_max_int / 10)
 
-import pandas as pd # DataFrames for tabular data, CSV reading in chunks.
-from bs4 import BeautifulSoup # (bs4): Parse HTML content, extract text and links.
-from urlextract import URLExtract # robusr url extraction even without https://
-from urllib.parse import urlparse # extract domain (netloc) from url
-from email.utils import parseaddr # safely parse email addresses from headers
-
+import pandas as pd 
+from bs4 import BeautifulSoup
+from urlextract import URLExtract 
+from urllib.parse import urlparse 
+from email.utils import parseaddr 
 # =============================
-# CONFIG
+#                                 CONFIG
 # =============================
 RAW_DATA_PATH = r"C:\Users\hassan\Desktop\phishing_detection_system\data\raw"
 PROCESSED_DATA_PATH = r"C:\Users\hassan\Desktop\phishing_detection_system\data\processed"
 OUTPUT_FILE = "phishguard_features.csv"
-# r: for raw string. \: not escaped
 MAX_WORKERS = max(1, cpu_count() - 1)
-CSV_CHUNKSIZE = 5000 # read rows per chunk
-
-# Logging setup
-logging.getLogger("urlextract").setLevel(logging.CRITICAL) # Suppress verbose logging from the urlextract library.
+CSV_CHUNKSIZE = 5000 
+logging.getLogger("urlextract").setLevel(logging.CRITICAL) 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-LABEL_MAP = { # maps string labels to integers
+LABEL_MAP = {
     "spam": 1, "phish": 1, "phishing": 1, "1": 1, "yes": 1, "true": 1, "malicious": 1,
     "ham": 0, "legit": 0, "legitimate": 0, "0": 0, "no": 0, "false": 0
 }
 
-URGENT_WORDS = { # set of keywords indicating urgency
+URGENT_WORDS = { 
     "urgent", "immediately", "asap", "now", "today", "within 24 hours",
     "limited time", "expires", "deadline", "final notice", "last chance",
     "verify", "verification required", "confirm", "validate",
@@ -71,15 +61,12 @@ URGENT_WORDS = { # set of keywords indicating urgency
     "click below", "click here", "open attachment",
     "download attached file", "review document"
 }
-
 # =============================
-# UTILITIES
+#                     UTILITIES
 # =============================
-# Converts None to empty string, then collapses all whitespace runs into single spaces, and trims.
 def normalize(text: Optional[str]) -> str:
     return re.sub(r"\s+", " ", str(text or "")).strip()
 
-# Regex Patterns
 URL_RE = re.compile(r"(https?://\S+|www\.\S+)", flags=re.IGNORECASE)
 EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b")
 DIGIT_RE = re.compile(r"\d+")
@@ -87,106 +74,79 @@ HTML_TAG_RE = re.compile(r"<.*?>")
 MULTI_SPACE_RE = re.compile(r"\s+")
 REPEATED_CHARS_RE = re.compile(r"(.)\1{2,}")
 
-# --- English Detection Heuristic ---
 def is_english_quality_check(text: str) -> bool:
     """
-    Returns True if text appears to be English.
-    Logic: If > 50% of the alphabetic characters are ASCII (English), keep it.
-    This handles cases where a footer might be non-English but the body is English.
+    If > 50% of the alphabetic characters are ASCII (English), handles cases where a footer might be non-English but the body is English.
     """
-    if not text or len(text) < 3: # Too short to judge, likely garbage
+    if not text or len(text) < 3:
         return False 
     
-    # Remove whitespace, panctuation and numbers to check only letters
     text_only = re.sub(r"[\s\d\W]", "", text)
     if not text_only: 
-        return True # It was likely just numbers/symbols (e.g. an invoice), keep it.
+        return True 
         
-    ascii_chars = sum(1 for c in text_only if c.isascii()) # count ascii letters
+    ascii_chars = sum(1 for c in text_only if c.isascii()) 
     total_chars = len(text_only)
-    
     if total_chars == 0: return False 
     
-    # If 90% of characters are non-ASCII, it's definitely not English
     ratio = ascii_chars / total_chars
-    return ratio > 0.5  #  If > 50% of the alphabetic characters are ASCII (English)
+    return ratio > 0.5 
 
 def clean_for_embeddings(text: str) -> str:
     """
-    Clean text for FastText (ENGLISH ONLY).
-    Safeguards against empty returns.
+    clean text for FastText (ENGLISH ONLY).
     """
     if not text:
-        return "<EMPTY>" # replace with empty strings
+        return "<EMPTY>"
 
     import html
-    text = html.unescape(text) # Unescape HTML entities (&amp; → &).
+    text = html.unescape(text) 
     
-    # Strip HTML, remove html tags using beautifulsoup, if not possible use regex
     if bool(re.search(r'<[^>]+>', text)):
         try:
             text = BeautifulSoup(text, "html.parser").get_text(separator=" ")
         except Exception:
             text = HTML_TAG_RE.sub(" ", text)
 
-    # Replace entities
     text = URL_RE.sub(" <URL> ", text)
     text = EMAIL_RE.sub(" <EMAIL> ", text)
     text = DIGIT_RE.sub(" <NUM> ", text)
-
-    # Strict English Filter: Remove non-alphanumeric (except placeholders)
     text = re.sub(r"[^a-zA-Z0-9\s<>]", " ", text)
-
-    # remove repeated chars, lowercase, and collapse whitespace
     text = REPEATED_CHARS_RE.sub(r"\1", text)
     text = text.lower()
     text = MULTI_SPACE_RE.sub(" ", text).strip()
-
-    # Final check: If the cleaner stripped everything, return a token
     return text if text else "<EMPTY>"
 
 def shannon_entropy(s: str) -> float:
     """
-    Body Entropy (Shannon Entropy)
-   - Concept: A statistical measure of randomness or unpredictability in the 
-     character distribution of a sequence.
-   - ML Application (Phishing): 
-     * Low (~0.0-3.5): Highly repetitive, restricted character sets.
-     * Normal (~3.5-5.0): Natural human language (predictable letter frequency).
-     * High (~5.0-8.0+): Completely random gibberish, Base64 strings, or 
-       obfuscated URLs. A sudden spike in entropy is a strong feature for 
-       detecting malicious evasion techniques.
-    body entropy simply is a "weirdness meter" or a "randomness score" for the letters in an email.
+   statistical measure of randomness or unpredictability in the character distribution of a sequence.
     """
-    # count character frequencies, Computes information entropy of a string: high entropy → random‑looking (could indicate obfuscation).
     if not s: return 0.0
     counts = Counter(s)
     return -sum((c / len(s)) * math.log2(c / len(s)) for c in counts.values())
 
-def compute_hash(subject: str, body: str, sender: str) -> str: # use sha256 to identify duplicated emails based on sender, subject, body
+def compute_hash(subject: str, body: str, sender: str) -> str: 
     base = f"{subject}|{body}|{sender}"
     return hashlib.sha256(base.encode("utf-8", errors="ignore")).hexdigest()
 
-def normalize_label(value) -> int: # convert label representstions to 1,0 and (-1) for unknown
+def normalize_label(value) -> int:
     if value is None: return -1
     raw = str(value).strip().lower()
     return LABEL_MAP.get(raw, -1)
 
 # =============================
-# URL & HEADER UTILS
+#             URL & HEADER UTILS
 # =============================
 _URL_EXTRACTOR = URLExtract()
 
 def safe_find_urls(text: str) -> List[str]:
     if not text: return []
     try:
-        #remove any non‑UTF‑8 bytes that could crash the extractor.
         safe_text = text.encode("utf-8", errors="ignore").decode("utf-8", errors="ignore")
         return _URL_EXTRACTOR.find_urls(safe_text) or []
     except Exception:
         return []
 
-# maps auth results to numeric score
 _SPFFLAGS = {"pass": 1, "fail": 0, "softfail": 0, "neutral": -1, "none": -1}
 _DKIMFLAGS = {"pass": 1, "fail": 0, "neutral": -1, "none": -1}
 _DMARCFLAGS = {"pass": 1, "fail": 0, "none": -1, "quarantine": 0, "reject": 0}
@@ -194,14 +154,12 @@ _SPF_RE = re.compile(r'\bspf=([a-zA-Z0-9_-]+)\b', flags=re.IGNORECASE)
 _DKIM_RE = re.compile(r'\bdkim=([a-zA-Z0-9_-]+)\b', flags=re.IGNORECASE)
 _DMARC_RE = re.compile(r'\bdmarc=([a-zA-Z0-9_-]+)\b', flags=re.IGNORECASE)
 
-# searches the header text with the given regex, looks up the result in the mapping, returns default if not found.
 def _extract_flag(pattern, text, mapping, default=-1):
     if not text: return default
     m = pattern.search(text)
     return mapping.get(m.group(1).lower(), default) if m else default
 
 def parse_auth_from_headers(headers_text: str) -> Dict[str, object]:
-    # Extracts SPF, DKIM, DMARC results from Authentication-Results or similar headers.
     result = {
         "auth_headers_present": False, "spf_result": -1, "dkim_result": -1, 
         "dmarc_result": -1, "return_path_domain": "", "received_count": 0
@@ -216,13 +174,12 @@ def parse_auth_from_headers(headers_text: str) -> Dict[str, object]:
     m_rp = re.search(r'(?mi)^Return-Path:\s*<?([^>\r\n]+)>?', headers_text)
     if m_rp:
         rp_addr = parseaddr(m_rp.group(1).strip())[1]
-        result["return_path_domain"] = rp_addr.split("@", 1)[1].lower() if "@" in rp_addr else "" # parse the domain
-    # count received hops
+        result["return_path_domain"] = rp_addr.split("@", 1)[1].lower() if "@" in rp_addr else "" 
     result["received_count"] = len(re.findall(r'(?mi)^\s*Received:', headers_text))
     return result
 
 # =============================
-# FEATURE ENGINE (With Filtering)
+#             FEATURE ENGINE (With Filtering)
 # =============================
 def build_features(subject: str, body: str, sender: str, urls: List[str], 
                    html_present: int, attachments: List[str], label: int, 
@@ -230,23 +187,20 @@ def build_features(subject: str, body: str, sender: str, urls: List[str],
     """
     Returns Dict of features, OR Returns None if the text is not English.
     """
-    
-    # 1. English Filter Check
     combined_check = f"{subject} {body}"
     if not is_english_quality_check(combined_check):
-        return None  # DROP THIS ROW
+        return None  
 
     auth_info = auth_info or {}
     header_fields = header_fields or {}
-    domains = [urlparse(u).netloc for u in urls if urlparse(u).netloc] # extracts domains 
-    
+    domains = [urlparse(u).netloc for u in urls if urlparse(u).netloc]  
     cleaned_text = clean_for_embeddings(combined_check)
     urgent_set = {w for w in URGENT_WORDS if w in combined_check.lower()}
 
     return {
         "subject": subject,
         "body": body,
-        "clean_text": cleaned_text, # Guaranteed not to be empty string
+        "clean_text": cleaned_text, 
         "sender": sender,
         "from_header": header_fields.get("from_header", ""),
         "recipient": header_fields.get("recipient", ""),
@@ -257,7 +211,7 @@ def build_features(subject: str, body: str, sender: str, urls: List[str],
         "x_originating_ip": header_fields.get("x_originating_ip", ""),
         "content_type": header_fields.get("content_type", ""),
         "urls": ";".join(urls)[:32000],
-        "domains": ";".join(dict.fromkeys(domains))[:32000], # length limited to 32,000 chars to avoid csv field overflow
+        "domains": ";".join(dict.fromkeys(domains))[:32000],
         "ip_urls": list(u for u in urls if re.match(r"^https?://(?:\d{1,3}\.){3}\d{1,3}\b", u)),
         "urgent_words_count": len(urgent_set),
         "digit_ratio": sum(c.isdigit() for c in (body or "")) / max(len(body or ""), 1),
@@ -274,17 +228,16 @@ def build_features(subject: str, body: str, sender: str, urls: List[str],
     }
 
 # =============================
-# EML PARSING
+#             EML PARSING
 # =============================
 def parse_eml(path: str) -> Optional[Dict]:
-    try: # read .eml file as bytes and parse with email.message_from_bytes
+    try: 
         msg = email.message_from_bytes(open(path, "rb").read())
     except Exception:
         return None
 
     subject = normalize(msg.get("Subject", ""))
     sender = normalize(msg.get("From", ""))
-    
     body_parts = []
     html_present = 0
     attachments = []
@@ -296,26 +249,22 @@ def parse_eml(path: str) -> Optional[Dict]:
             payload = part.get_payload(decode=True)
             if not payload: continue
             
-            # Try decoding as utf-8, fallback to latin-1 for western languages
             try:
                 decoded = payload.decode("utf-8", errors="strict")
             except UnicodeError:
                 decoded = payload.decode("latin-1", errors="ignore")
                 
             if ctype == "text/plain" and "attachment" not in disp:
-                body_parts.append(decoded) # add plain text to body
-            elif ctype == "text/html": # convert html to text using beautifulsoup and mark html_present=1
+                body_parts.append(decoded) 
+            elif ctype == "text/html":
                 html_present = 1
                 body_parts.append(BeautifulSoup(decoded, "html.parser").get_text(" ", strip=False))
-            if part.get_filename(): # collect filenames
+            if part.get_filename():
                 attachments.append(part.get_filename())
         except Exception:
             continue
-
     body = normalize(" ".join(body_parts))
     urls = safe_find_urls(body)
-    
-    # Header Extraction
     header_fields = {
         "from_header": normalize(msg.get("From", "")),
         "to_header": normalize(msg.get("To", "")),
@@ -328,17 +277,17 @@ def parse_eml(path: str) -> Optional[Dict]:
     }
     
     headers_text = "\n".join(f"{k}: {v}" for k, v in msg.items())
-    auth_info = parse_auth_from_headers(headers_text) # auth info 
+    auth_info = parse_auth_from_headers(headers_text)  
 
     return build_features(subject, body, sender, urls, html_present, attachments, -1, auth_info, header_fields) # build features and label with -1 if unknown
 
 # =============================
-# CSV PARSING
+#             CSV PARSING
 # =============================
 def parse_csv_row(row: Dict) -> Optional[Dict]:
     label = normalize_label(row.get("phish") or row.get("label") or row.get("class") or row.get("spam"))
     
-    header_fields = { # extract headers
+    header_fields = { 
         "from_header": normalize(row.get("from") or row.get("from_header")),
         "to_header": normalize(row.get("to") or row.get("to_header")),
         "recipient": normalize(row.get("delivered-to") or row.get("recipient") or row.get("to")),
@@ -348,44 +297,34 @@ def parse_csv_row(row: Dict) -> Optional[Dict]:
         "x_originating_ip": normalize(row.get("x-originating-ip") or row.get("x_originating_ip")),
         "content_type": normalize(row.get("content-type") or row.get("content_type"))
     }
-
-    # Auth parsing
     headers_text = str(row.get("raw_headers") or row.get("headers") or "")
     auth_info = parse_auth_from_headers(headers_text) if headers_text else {}
-
-    # Find Body/Subject
     text_fields = {k: normalize(v) for k, v in row.items() if isinstance(v, str) and normalize(v)}
     if not text_fields: return None
-    
     sorted_fields = sorted(text_fields.items(), key=lambda x: len(x[1]), reverse=True)
-    body = sorted_fields[0][1] # longest is assumed to be body, the second is subject
+    body = sorted_fields[0][1] 
     subject = sorted_fields[1][1] if len(sorted_fields) > 1 else ""
     sender = normalize(row.get("from") or row.get("sender") or "")
-
     urls = safe_find_urls(body)
-
-    # Note: build_features now returns None if text is not English, html present set to 0 because csv usually lacks html markup
     return build_features(subject, body, sender, urls, 0, [], label, auth_info, header_fields)
 
 # =============================
-# MAIN LOGIC
+#         MAIN LOGIC
 # =============================
 def iter_csv_rows(path: str) -> Iterable[Dict]:
-    try:     # encoding="utf-8" and encoding_errors="ignore" to skip bad bytes
-        # use pandas to read csv in chunks, dtype=str keeps everything as strings, engine=python slower but more flexible supports on_bad_lines
+    try:     
         for chunk in pd.read_csv(path, dtype=str, engine="python", on_bad_lines="skip", # ignores malformed lines,
                                chunksize=CSV_CHUNKSIZE, encoding="utf-8", encoding_errors="ignore"):
             chunk = chunk.fillna("")
             for record in chunk.to_dict(orient="records"):
-                yield record #  yields each row as dictionary
+                yield record 
     except Exception as e:
         logging.error("Failed reading CSV %s: %s", path, e)
 
 def process_emls(files: List[str]) -> List[Dict]:
     if not files: return []
     with Pool(MAX_WORKERS) as pool:
-        results = pool.map(parse_eml, files) # distributes the list of file paths across workers.
-    # Filter out None values (non-English emails are now None)
+        results = pool.map(parse_eml, files) 
     return [r for r in results if r]
 
 def load_raw_data(raw_dir: str) -> pd.DataFrame:
@@ -393,7 +332,7 @@ def load_raw_data(raw_dir: str) -> pd.DataFrame:
     eml_files = []
     csv_files = []
 
-    for root, _, files in os.walk(raw_dir): # recursively walks 
+    for root, _, files in os.walk(raw_dir): 
         for f in files: 
             full = os.path.join(root, f)
             if f.lower().endswith(".eml"):
@@ -410,11 +349,10 @@ def load_raw_data(raw_dir: str) -> pd.DataFrame:
         for row in iter_csv_rows(csv_path):
             try:
                 rec = parse_csv_row(row)
-                if rec: # Only append if rec is not None (i.e. is English)
+                if rec:
                     records.append(rec)
             except Exception:
                 continue
-    # returns dataframe of processed records
     return pd.DataFrame(records) 
 
 def main():
@@ -423,15 +361,13 @@ def main():
     output_path = os.path.join(PROCESSED_DATA_PATH, OUTPUT_FILE)
 
     old_df = pd.read_csv(output_path, dtype=str).fillna("") if os.path.exists(output_path) else pd.DataFrame()
-    new_df = load_raw_data(RAW_DATA_PATH) # load data
+    new_df = load_raw_data(RAW_DATA_PATH) 
 
     logging.info("New English records extracted: %d", len(new_df))
-    # assign -1 for unknown labels
     if "label" not in new_df.columns: new_df["label"] = -1
     if not old_df.empty and "label" not in old_df.columns: old_df["label"] = -1
 
     combined = pd.concat([old_df, new_df], ignore_index=True, sort=False)
-    # concatenate old and new 
     if combined.empty:
         logging.warning("No data loaded.")
         return
@@ -440,28 +376,23 @@ def main():
     combined.drop_duplicates("_hash", inplace=True)
     combined.drop(columns=["_hash"], inplace=True)
 
-    # Ensure clean_text is never empty before saving
     if "clean_text" in combined.columns:
         combined["clean_text"] = combined["clean_text"].replace("", "<EMPTY>")
-
     try:
         combined["label"] = combined["label"].astype(int) # ensure labels are int
     except Exception:
         combined["label"] = combined["label"].apply(lambda v: int(v) if str(v).isdigit() else -1)
-
     combined.to_csv(output_path, index=False)
     logging.info("Finished in %.2fs. Total rows: %d", time.time() - start, len(combined))
-
 # =============================
-# PRODUCTION REAL-TIME FUNCTION
+#         PRODUCTION REAL-TIME FUNCTION
 # =============================
 from bs4 import BeautifulSoup
 import email
 
 def production_preprocessing(raw_email: str) -> Optional[Dict]:
     """
-    Takes raw email string → returns processed feature dict.
-    Patched to retain raw metadata for Expert Overrides.
+    takes raw email string → returns processed feature dict.
     """
     try:
         msg = email.message_from_string(raw_email)
@@ -470,12 +401,9 @@ def production_preprocessing(raw_email: str) -> Optional[Dict]:
 
     subject = normalize(msg.get("Subject", ""))
     sender = normalize(msg.get("From", ""))
-
     body_parts = []
     html_present = 0
     attachments = []
-    
-    # catch hidden HTML URLs
     extracted_html_urls = []
 
     for part in msg.walk():
@@ -483,10 +411,8 @@ def production_preprocessing(raw_email: str) -> Optional[Dict]:
             ctype = part.get_content_type()
             disp = str(part.get_content_disposition() or "")
             payload = part.get_payload(decode=True)
-
             if not payload:
                 continue
-
             try:
                 decoded = payload.decode("utf-8", errors="strict")
             except UnicodeError:
@@ -494,30 +420,21 @@ def production_preprocessing(raw_email: str) -> Optional[Dict]:
 
             if ctype == "text/plain" and "attachment" not in disp:
                 body_parts.append(decoded)
-
             elif ctype == "text/html":
                 html_present = 1
                 soup = BeautifulSoup(decoded, "html.parser")
-                
-                # extract href links before stripping HTML
+    
                 for a_tag in soup.find_all('a', href=True):
                     extracted_html_urls.append(a_tag['href'])
-                
                 body_parts.append(soup.get_text(" ", strip=False))
 
             if part.get_filename():
                 attachments.append(part.get_filename())
-
         except Exception:
             continue
-
     body = normalize(" ".join(body_parts))
-    
-    # Combine plain text URLs with the hidden HTML URLs
     urls = safe_find_urls(body) + extracted_html_urls
-    # Remove duplicates just in case
     urls = list(set(urls))
-
     header_fields = {
         "from_header": normalize(msg.get("From", "")),
         "to_header": normalize(msg.get("To", "")),
@@ -528,10 +445,8 @@ def production_preprocessing(raw_email: str) -> Optional[Dict]:
         "x_originating_ip": normalize(msg.get("X-Originating-IP", "")),
         "content_type": normalize(msg.get("Content-Type", "")),
     }
-
     headers_text = "\n".join(f"{k}: {v}" for k, v in msg.items())
     auth_info = parse_auth_from_headers(headers_text)
-
     features = build_features(
         subject, body, sender, urls,
         html_present, attachments,
@@ -539,14 +454,13 @@ def production_preprocessing(raw_email: str) -> Optional[Dict]:
         auth_info=auth_info,
         header_fields=header_fields
     )
-    # force the raw metadata into the dictionary so predictor.py can use them for security heuristic
     if features is not None:
         features["urls"] = urls
         features["from_header"] = header_fields["from_header"]
         features["return_path"] = header_fields["return_path"] 
-        features["raw_text"] = raw_email # useful if need to regex the raw headers just in case
-
-    return features    
+        features["raw_text"] = raw_email 
+    return features   
+    
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "prod":
         raw_email = sys.stdin.read()
