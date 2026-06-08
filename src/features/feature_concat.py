@@ -11,26 +11,23 @@ Production mode (Imported OR --mode prod):
     - Accept embedding array + manual feature dict directly from other modules.
     - Produce model-ready vector.
 """
-
-import os # for file paths
-import sys # system exit
-import json # save/ load feature schema
+import os 
+import sys 
+import json 
 import logging 
 import argparse
 import numpy as np
 import pandas as pd
-import joblib # save/ load scikit-learn scaler
+import joblib 
 from concurrent.futures import ThreadPoolExecutor
-from sklearn.preprocessing import StandardScaler # standardise manual features (zero mean, unit variance).
+from sklearn.preprocessing import StandardScaler 
 from pathlib import Path
-from email.utils import parseaddr # safely extract email address from "Name <email>" format.
+from email.utils import parseaddr 
 from typing import Dict, Any, Union
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("feature_pipeline")
 
 # ================= CONFIG =================
-# Resolving absolute paths ensures it works no matter where the script is imported from
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 DATA_DIR = PROJECT_ROOT / "data/processed/embed_output"
 MODEL_DIR = PROJECT_ROOT / "models"
@@ -66,77 +63,65 @@ COUNT_FEATURES = [
 HEADER_FEATURES = [
     "return_path_mismatch"
 ]
-
 MANUAL_FEATURES = NUMERIC_BASE + COUNT_FEATURES + HEADER_FEATURES
-
 # ================= HEADER UTILS =================
 def extract_domain(email_string: str) -> str:
     if not isinstance(email_string, str) or not email_string:
         return ""
-    _, addr = parseaddr(email_string) # returns real name and email address
+    _, addr = parseaddr(email_string) 
     if "@" in addr:
-        return addr.split("@")[-1].lower() # get domain after @ and lowercase
-    return "" # if not valid email returns empty string
+        return addr.split("@")[-1].lower() 
+    return "" 
 
 def return_path_mismatch(row: pd.Series) -> int:
-    # Use from_header, fallback to sender if needed
     sender = extract_domain(row.get("from_header", row.get("sender", "")))
     return_path = extract_domain(row.get("return_path", ""))
 
     if sender and return_path and sender != return_path:
-        return 1 # if both exists and differ
+        return 1 
     return 0
-
 # ================= PARALLEL FEATURE EXTRACTION =================
 def extract_manual_features(df: pd.DataFrame) -> np.ndarray:
     logger.info("Vectorized feature extraction...")
 
     for col in NUMERIC_BASE + COUNT_FEATURES:
         if col not in df.columns:
-            df[col] = 0 # fill missing columns with 0
+            df[col] = 0 
 
     df[NUMERIC_BASE + COUNT_FEATURES] = df[NUMERIC_BASE + COUNT_FEATURES].apply(
         pd.to_numeric, errors="coerce"
-    ).fillna(0) # Converts them to numeric (coerce errors to NaN) then fill NaN with 0.replace not number values with NaN then convert NaN -> O 
-# instead of replacing with zero let the model to handle it 
-    # Vectorized return_path mismatch
-    # Checking both 'from_header' and 'sender' to ensure robustness
+    ).fillna(0)
     sender_col = df["from_header"] if "from_header" in df.columns else df.get("sender", pd.Series([""]*len(df)))
     sender_domains = sender_col.apply(extract_domain)
     return_domains = df.get("return_path", pd.Series([""]*len(df))).apply(extract_domain)
-# safety net to prevent code from crash, handle by assigning missing values instead of crashing the code. 
     df["return_path_mismatch"] = (
         (sender_domains != "") &
-        (return_domains != "") & # change it to use apply() 
+        (return_domains != "") & 
         (sender_domains != return_domains)
-    ).astype(int) # creates boolean mask where both domains are non‑empty and different, then casts to int.
+    ).astype(int) 
     return df[MANUAL_FEATURES].values.astype(np.float32)
-    # return 2d numpy array as float32
 # ================= TRAINING PIPELINE =================
 def train_pipeline():
     MODEL_DIR.mkdir(exist_ok=True, parents=True)
     DATA_DIR.mkdir(exist_ok=True, parents=True)
-    # creat directories, with intermediate ones (parents=true)
     logger.info("Loading dataset...")
-    df = pd.read_csv(CSV_PATH, dtype=str).fillna("") # read columns as string
+    df = pd.read_csv(CSV_PATH, dtype=str).fillna("") 
 
     logger.info("Loading labels...")
-    y = np.load(LABEL_PATH).astype(int) # load labels and embeddings from .npy files
-
+    y = np.load(LABEL_PATH).astype(int) 
     logger.info("Loading embeddings...")
     embeddings = np.load(EMBED_PATH)
 
-    # truncates all arrays to the smallest length (safety against mismatched rows)
     min_len = min(len(df), len(embeddings), len(y))
     df = df.iloc[:min_len]
     embeddings = embeddings[:min_len]
     y = y[:min_len]
     
     logger.info("Removing unlabeled rows (-1)...")
-    mask = y != -1 # check every single value in y array not equal to -1. return new array of true and false values
-    df = df.loc[mask].reset_index(drop=True) # renumbers rows consecutively
+    mask = y != -1 
+    df = df.loc[mask].reset_index(drop=True) 
     embeddings = embeddings[mask]
-    y = y[mask] # just keep the True values of mask which their label not -1 and drop other rows
+    y = y[mask]
 
     logger.info(f"Remaining labeled samples: {len(y)}")
     if len(y) == 0:
@@ -149,8 +134,8 @@ def train_pipeline():
     logger.info(f"Label distribution: {dict(zip(unique, counts))}")
     
     logger.info("Scaling manual features...")
-    scaler = StandardScaler() # standerises manual features 
-    X_manual = scaler.fit_transform(X_manual) # standarise the large values to smaller ones so that the model don't lose calculations
+    scaler = StandardScaler() 
+    X_manual = scaler.fit_transform(X_manual)
     joblib.dump(scaler, SCALER_PATH)
 
     logger.info("Stacking embeddings...")
@@ -158,10 +143,8 @@ def train_pipeline():
 
     logger.info("Concatenating features...")
     X = np.hstack([X_emb, X_manual]).astype(np.float32)
-    # horizontally stacks embeddings and manual features side by side 
     logger.info("Saving training features...")
     np.savez_compressed(OUTPUT_PATH, =, y=y)
-    # saves combined features and labels in compressed .npz
     schema = {
         "embedding_dim": X_emb.shape[1],
         "manual_features": MANUAL_FEATURES,
@@ -177,13 +160,11 @@ def train_pipeline():
 # ================= PRODUCTION FEATURE BUILDER =================
 class FeatureBuilder:
     """
-    Import this class into your main pipeline module.
-    It loads the schema/scaler ONCE upon initialization.
+    loads the schema/scaler ONCE upon initialization.
     """
     def __init__(self):
         if not SCHEMA_PATH.exists() or not SCALER_PATH.exists():
             raise FileNotFoundError("Schema or Scaler not found. Run --mode train first.")
-# loads schema and scaler once the object is created, raise error if not trained
         with open(SCHEMA_PATH) as f:
             schema = json.load(f)
 
@@ -194,13 +175,11 @@ class FeatureBuilder:
 
     def build_vector(self, embedding_vector: np.ndarray, manual_dict: Dict[str, Any]) -> np.ndarray:
         """
-        Takes the FastText array and the Preprocessed dictionary, 
-        returns the finalized 1D Numpy array for XGBoost.
+        takes the fasttext array and the preprocessed dictionary for XGBoost.
         """
         if len(embedding_vector) != self.embedding_dim:
             raise ValueError(f"Embedding dimension mismatch. Expected {self.embedding_dim}, got {len(embedding_vector)}") 
-        # validate embedding dimension
-        # Compute mismatch dynamically
+
         sender = manual_dict.get("from_header", manual_dict.get("sender", ""))
         ret_path = manual_dict.get("return_path", "")
         
@@ -215,8 +194,8 @@ class FeatureBuilder:
             manual_values.append(val)
 
         # Reshape for scaler (1 sample, n features)
-        manual_array = np.array(manual_values).reshape(1, -1) # convert the python list from 1D array to 2D array based on the features numbers that (-1) would find out the exact number of features in this case it will result in (1,14)
-        scaled_manual = self.scaler.transform(manual_array) # apply the same scaling
+        manual_array = np.array(manual_values).reshape(1, -1) 
+        scaled_manual = self.scaler.transform(manual_array)
 
         # Concatenate: [Embeddings, Scaled Manual Features]
         vector = np.hstack([embedding_vector.reshape(1, -1), scaled_manual])
