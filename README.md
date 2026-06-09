@@ -16,12 +16,12 @@ Designed for transparency and enterprise integration, PhishGuard utilizes SHAP (
 ## Creat and activate virtual environment
 python3 -m venv venv
 
-source venv/bin/activate  
+# On Linux use  : source venv/bin/activate  
 # On Windows use: .\venv\Scripts\activate
 
 pip install -r requireements.txt 
 
-## Usage 
-python predictor.py --vt-key YOUR_VIRUSTOTAL_API_KEY
+## Usage (from inside the virtual environment) 
+python predictor.py --vt-key [YOUR_VIRUSTOTAL_API_KEY]
 
-Enter the raw email and press enter then CTRL+D
+Paste the raw email and press enter then CTRL+D
